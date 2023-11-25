@@ -1,0 +1,196 @@
+version: '2.11'
+services:
+  # PHP container
+  php:
+    env_file:
+      - "./eshop/.env"
+    container_name: eshop-app
+    restart: always
+    depends_on:
+      keyrock-db:
+        condition: service_healthy
+    build:
+      context: ./eshop
+      target: php
+      args:
+        - APP_ENV=${APP_ENV}
+    environment:
+      - APP_ENV=${APP_ENV}
+      - CONTAINER_ROLE=app
+    ports:
+      - '8000:8000'
+
+# Keyrock is an Identity Management Service
+  keyrock:
+    env_file:
+      - "./eshop/.env"
+    image: fiware/idm:${KEYROCK_VERSION}
+    container_name: fiware-keyrock
+    hostname: keyrock
+    networks:
+      default:
+        ipv4_address: 172.18.1.5
+    depends_on:
+      keyrock-db:
+        condition:  service_healthy
+    ports:
+      - "${KEYROCK_PORT}:${KEYROCK_PORT}" # localhost:3005
+      - "${KEYROCK_HTTPS_PORT}:${KEYROCK_HTTPS_PORT}" # localhost:3443
+    environment:
+      - "DEBUG=idm:*"
+      - "IDM_DB_HOST=keyrock-db"
+      - "IDM_DB_PASS=secret"
+      - "IDM_DB_USER=root"
+      - "IDM_PORT=${KEYROCK_PORT}"
+      - "IDM_HOST=http://localhost:${KEYROCK_PORT}"
+      - "IDM_ADMIN_USER=admin"
+      - "IDM_ADMIN_EMAIL=admin@test.com"
+      - "IDM_ADMIN_PASS=1234"
+      - IDM_CSP_FORM_ACTION=*
+    healthcheck:
+      interval: 5s
+
+  # Database
+  keyrock-db:
+    env_file:
+      - "./eshop/.env"
+    restart: always
+    image: mysql:8.0
+    hostname: keyrock-db
+    container_name: db-mysql
+    expose:
+      - "3306"
+    ports:
+      - "3306:3306"
+    networks:
+      default:
+        ipv4_address: 172.18.1.6
+    environment:
+      - "MYSQL_DATABASE=idm"
+      - "MYSQL_ROOT_PASSWORD=secret"
+      - "MYSQL_ROOT_HOST=%" # Allow Keyrock to access this database
+    volumes:
+      - ./keyrock_data:/var/lib/mysql
+      - ./eshop/db/idm.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: mysqladmin ping -h 127.0.0.1 -u root --password=secret
+      start_period: 5s
+      interval: 5s
+      timeout: 5s
+      retries: 55
+
+  storage-service-mongodb:
+    image: mongo:6.0
+    container_name: dss_mongodb
+    hostname: dssmongodb
+    ports: 
+      - 27017:27017
+    volumes:
+      - ./storage_service_data:/data/db
+    networks:
+      default:
+        ipv4_address: 172.18.1.7
+  
+  storage-service:
+    container_name: storage-service
+    hostname: dss
+    restart: always
+    depends_on:
+      - storage-service-mongodb
+    build:
+      context: ./data_storage_service
+      target: php
+      args:
+        - APP_ENV=local
+    environment:
+      - APP_ENV=local
+      - CONTAINER_ROLE=app
+    ports:
+      - '6565:6565'
+    networks:
+      default:
+        ipv4_address: 172.18.1.8
+  
+  dss-proxy:
+    image: fiware/pep-proxy
+    container_name: dss-pep-proxy
+    hostname: dss-pep-proxy
+    networks:
+        default:
+          ipv4_address: 172.18.1.9
+    ports:
+      - 4001:4001
+    expose:
+      - 4001
+    depends_on:
+      - storage-service
+      - keyrock
+    environment:
+      - PEP_PROXY_APP_HOST=dss
+      - PEP_PROXY_APP_PORT=6565
+      - PEP_PROXY_PORT=4001
+      - PEP_PROXY_IDM_HOST=keyrock
+      - PEP_PROXY_HTTPS_ENABLED=false
+      - PEP_PROXY_AUTH_ENABLED=false
+      - PEP_PROXY_IDM_SSL_ENABLED=false
+      - PEP_PROXY_IDM_PORT=3005
+      - PEP_PROXY_APP_ID=b7221fc8-5c00-44bb-a303-ecffdabe056a
+      - PEP_PROXY_USERNAME=pep_proxy_7514f6db-58a4-42d5-b957-1540bc79adcc
+      - PEP_PASSWORD=pep_proxy_fb153c60-da6f-46df-83ba-0243b08ca8d0
+      - PEP_PROXY_PDP=idm
+
+  orion-proxy:
+    image: fiware/pep-proxy
+    container_name: orion-pep-proxy
+    hostname: orion-pep-proxy
+    networks:
+        default:
+          ipv4_address: 172.18.1.10
+    ports:
+      - 4002:4002
+    expose:
+      - 4002
+    depends_on:
+      - orion-mongodb
+      - orion
+      - keyrock
+    environment:
+      - PEP_PROXY_APP_HOST=orion
+      - PEP_PROXY_APP_PORT=1026
+      - PEP_PROXY_PORT=4002
+      - PEP_PROXY_IDM_HOST=keyrock
+      - PEP_PROXY_HTTPS_ENABLED=false
+      - PEP_PROXY_AUTH_ENABLED=false
+      - PEP_PROXY_IDM_SSL_ENABLED=false
+      - PEP_PROXY_IDM_PORT=3005
+      - PEP_PROXY_APP_ID=b7221fc8-5c00-44bb-a303-ecffdabe056a
+      - PEP_PROXY_USERNAME=pep_proxy_7514f6db-58a4-42d5-b957-1540bc79adcc
+      - PEP_PASSWORD=pep_proxy_fb153c60-da6f-46df-83ba-0243b08ca8d0
+      - PEP_PROXY_PDP=idm
+
+  orion-mongodb:
+    image: mongo:6.0
+    container_name: orion-mongodb
+    hostname: orion-mongodb
+    command: --nojournal
+    volumes:
+      - ./orion_data:/data/db
+  orion:
+    image: fiware/orion
+    container_name: orion-cb
+    hostname: orion
+    links:
+      - orion-mongodb
+    ports:
+      - "1026:1026"
+    command: -dbhost orion-mongodb
+    networks:
+        default:
+          ipv4_address: 172.18.1.11
+
+networks:
+  default:
+    ipam:
+      config:
+        - subnet: 172.18.1.0/24
+          gateway: 172.18.1.1
